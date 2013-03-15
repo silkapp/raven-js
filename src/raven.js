@@ -11,7 +11,10 @@ var _Raven = window.Raven,
     globalProject,
     globalOptions = {
         logger: 'javascript',
-        ignoreUrls: []
+        ignoreErrors: [],
+        ignoreUrls: [],
+        includePaths: [],
+        tags: {}
     };
 
 var TK = TraceKit.noConflict();
@@ -50,16 +53,20 @@ var Raven = {
             lastSlash = uri.path.lastIndexOf('/'),
             path = uri.path.substr(1, lastSlash);
 
-        if (options && options.ignoreErrors && window.console && console.warn) {
-            console.warn('DeprecationWarning: `ignoreErrors` is going to be removed soon.');
-        }
-
         // merge in options
         if (options) {
             each(options, function(key, value){
                 globalOptions[key] = value;
             });
         }
+
+        // join regexp rules into one big rule
+        globalOptions.ignoreUrls = globalOptions.ignoreUrls.length ? joinRegExp(globalOptions.ignoreUrls) : false;
+        globalOptions.includePaths = joinRegExp(globalOptions.includePaths);
+
+        // "Script error." is hard coded into browsers for errors that it can't read.
+        // this is the result of a script being pulled in from an external domain and CORS.
+        globalOptions.ignoreErrors.push('Script error.');
 
         globalKey = uri.user;
         globalProject = ~~uri.path.substr(lastSlash + 1);
@@ -275,7 +282,7 @@ function handleStackInfo(stackInfo, options) {
         each(stackInfo.stack, function(i, stack) {
             var frame = normalizeFrame(stack);
             if (frame) {
-                frames.push(frame);
+                frames.unshift(frame);
             }
         });
     }
@@ -299,14 +306,22 @@ function normalizeFrame(frame) {
         lineno:     frame.line,
         colno:      frame.column,
         'function': frame.func || '?'
-    }, context = extractContextFromFrame(frame);
+    }, context = extractContextFromFrame(frame), i;
 
     if (context) {
-        var i = 3, keys = ['pre_context', 'context_line', 'post_context'];
+        var keys = ['pre_context', 'context_line', 'post_context'];
+        i = 3;
         while (i--) normalized[keys[i]] = context[i];
     }
 
-    // normalized.in_app = !/(Raven|TraceKit)\./.test(normalized['function']);
+    normalized.in_app = !( // determine if an exception came from outside of our app
+        // first we check the global includePaths list.
+        !globalOptions.includePaths.test(normalized.filename) ||
+        // Now we check for fun, if the function name is Raven or TraceKit
+        /(Raven|TraceKit)\./.test(normalized['function']) ||
+        // finally, we do a last ditch effort and check for raven.min.js
+        /raven\.(min\.)js$/.test(normalized.filename)
+    );
 
     return normalized;
 }
@@ -353,9 +368,14 @@ function extractContextFromFrame(frame) {
 function processException(type, message, fileurl, lineno, frames, options) {
     var stacktrace, label, i;
 
-    // "Script error." is hard coded into browsers for errors that it can't read.
-    // this is the result of a script being pulled in from an external domain and CORS.
-    if (message === 'Script error.') return;
+    // IE8 really doesn't have Array.prototype.indexOf
+    // Filter out a message that matches our ignore list
+    i = globalOptions.ignoreErrors.length;
+    while (i--) {
+        if (message === globalOptions.ignoreErrors[i]) {
+            return;
+        }
+    }
 
     if (frames && frames.length) {
         stacktrace = {frames: frames};
@@ -369,12 +389,7 @@ function processException(type, message, fileurl, lineno, frames, options) {
         };
     }
 
-    i = globalOptions.ignoreUrls.length;
-    while (i--) {
-        if (globalOptions.ignoreUrls[i].test(fileurl)) {
-            return;
-        }
-    }
+    if (globalOptions.ignoreUrls && globalOptions.ignoreUrls.test(fileurl)) return;
 
     label = lineno ? message + ' at ' + lineno : message;
 
@@ -428,6 +443,12 @@ function send(data) {
         'sentry.interfaces.Http': getHttpData()
     }, data);
 
+    // Merge in the tags separately since arrayMerge doesn't handle a deep merge
+    data.tags = arrayMerge(globalOptions.tags, data.tags);
+
+    // If there are no tags, strip the key from the payload alltogther.
+    if (!data.tags) delete data.tags;
+
     if (globalUser) data['sentry.interfaces.User'] = globalUser;
 
     if (isFunction(globalOptions.dataCallback)) {
@@ -466,4 +487,12 @@ function wrapArguments(what) {
     // copy over properties of the old function
     for (var k in what) wrapped[k] = what[k];
     return wrapped;
+}
+
+function joinRegExp(patterns) {
+    // Combine an array of regular expressions into one large regexp
+    var sources = [], i = patterns.length;
+    // lol, map
+    while (i--) sources[i] = patterns[i].source;
+    return new RegExp(sources.join('|'), 'i');
 }

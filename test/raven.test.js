@@ -6,7 +6,10 @@ function flushRavenState() {
   globalProject = undefined;
   globalOptions = {
     logger: 'javascript',
-    ignoreUrls: []
+    ignoreErrors: [],
+    ignoreUrls: [],
+    includePaths: [],
+    tags: {}
   };
   Raven.uninstall();
 }
@@ -30,6 +33,7 @@ function setupRaven() {
 
 describe('globals', function() {
   beforeEach(function() {
+    setupRaven();
     globalOptions.fetchContext = true;
   });
 
@@ -158,7 +162,7 @@ describe('globals', function() {
         pre_context: ['line1'],
         context_line: 'line2',
         post_context: ['line3'],
-        // in_app: true
+        in_app: true
       });
     });
 
@@ -179,7 +183,51 @@ describe('globals', function() {
         lineno: 10,
         colno: 11,
         'function': 'lol',
-        // in_app: true
+        in_app: true
+      });
+    });
+
+    it('should not mark `in_app` if rules match', function() {
+      this.sinon.stub(window, 'extractContextFromFrame').returns(undefined);
+      var frame = {
+        url: 'http://example.com/path/file.js',
+        line: 10,
+        column: 11,
+        func: 'lol'
+        // context: []  context is stubbed
+      };
+
+      globalOptions.fetchContext = true;
+      globalOptions.includePaths = /^http:\/\/example\.com/;
+
+      assert.deepEqual(normalizeFrame(frame), {
+        filename: 'http://example.com/path/file.js',
+        lineno: 10,
+        colno: 11,
+        'function': 'lol',
+        in_app: true
+      });
+    });
+
+    it('should mark `in_app` if rules do not match', function() {
+      this.sinon.stub(window, 'extractContextFromFrame').returns(undefined);
+      var frame = {
+        url: 'http://lol.com/path/file.js',
+        line: 10,
+        column: 11,
+        func: 'lol'
+        // context: []  context is stubbed
+      };
+
+      globalOptions.fetchContext = true;
+      globalOptions.includePaths = /^http:\/\/example\.com/;
+
+      assert.deepEqual(normalizeFrame(frame), {
+        filename: 'http://lol.com/path/file.js',
+        lineno: 10,
+        colno: 11,
+        'function': 'lol',
+        in_app: false
       });
     });
   });
@@ -261,17 +309,22 @@ describe('globals', function() {
   });
 
   describe('processException', function() {
-    it('should ignore "Script error."', function() {
+    it('should respect `ignoreErrors`', function() {
       this.sinon.stub(window, 'send');
 
-      processException('', 'Script error.');
+      globalOptions.ignoreErrors = ['e1', 'e2'];
+      processException('Error', 'e1', 'http://example.com', []);
       assert.isFalse(window.send.called);
+      processException('Error', 'e2', 'http://example.com', []);
+      assert.isFalse(window.send.called);
+      processException('Error', 'error', 'http://example.com', []);
+      assert.isTrue(window.send.calledOnce);
     });
 
     it('should respect `ignoreUrls`', function() {
       this.sinon.stub(window, 'send');
 
-      globalOptions.ignoreUrls = [/.+?host1.+/, /.+?host2.+/];
+      globalOptions.ignoreUrls = joinRegExp([/.+?host1.+/, /.+?host2.+/]);
       processException('Error', 'error', 'http://host1/', []);
       assert.isFalse(window.send.called);
       processException('Error', 'error', 'http://host2/', []);
@@ -459,6 +512,38 @@ describe('globals', function() {
           name: 'Matt'
         },
         foo: 'bar'
+      }]);
+    });
+
+    it('should merge in global tags', function() {
+      this.sinon.stub(window, 'isSetup').returns(true);
+      this.sinon.stub(window, 'makeRequest');
+      this.sinon.stub(window, 'getHttpData').returns({
+        url: 'http://localhost/?a=b',
+        headers: {'User-Agent': 'lolbrowser'}
+      });
+
+      globalProject = 2;
+      globalOptions = {
+        logger: 'javascript',
+        site: 'THE BEST',
+        tags: {tag1: 'value1'}
+      };
+
+
+      send({tags: {tag2: 'value2'}});
+      assert.deepEqual(window.makeRequest.lastCall.args, [{
+        project: 2,
+        logger: 'javascript',
+        site: 'THE BEST',
+        platform: 'javascript',
+        'sentry.interfaces.Http': {
+          url: 'http://localhost/?a=b',
+          headers: {
+            'User-Agent': 'lolbrowser'
+          }
+        },
+        tags: {tag1: 'value1', tag2: 'value2'}
       }]);
     });
 
@@ -651,6 +736,7 @@ describe('Raven (public API)', function() {
       assert.equal(Raven, Raven.config(SENTRY_DSN, {foo: 'bar'}), 'it should return Raven');
       assert.equal(globalKey, 'abc');
       assert.equal(globalServer, 'http://example.com:80/api/2/store/');
+      assert.deepEqual(globalOptions.ignoreErrors, ['Script error.'], 'it should install "Script error." by default');
       assert.equal(globalOptions.foo, 'bar');
       assert.equal(globalProject, 2);
     });
@@ -659,6 +745,7 @@ describe('Raven (public API)', function() {
       Raven.config('//abc@example.com/2');
       assert.equal(globalKey, 'abc');
       assert.equal(globalServer, '//example.com/api/2/store/');
+      assert.deepEqual(globalOptions.ignoreErrors, ['Script error.'], 'it should install "Script error." by default');
       assert.equal(globalProject, 2);
     });
   });
